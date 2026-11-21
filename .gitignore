@@ -1,0 +1,23 @@
+# Dependencies and build
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Secrets (.env.example IS committed)
+.env
+.env.*
+!.env.example
+*-firebase-adminsdk-*.json
+
+# Runtime data: SQLite database and logs
+data/
+logs/
+*.log
+
+# Tests and editor
+coverage/
+.DS_Store
+
+# Claude Code (memory lives in the Obsidian vault)
+CLAUDE.md
+.claude/
