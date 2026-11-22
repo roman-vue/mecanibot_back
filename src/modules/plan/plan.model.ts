@@ -5,6 +5,7 @@ export interface AiTask {
   id: string;
   interval_km?: number | null;
   interval_months?: number;
+  basis?: 'manual' | 'typical';
   reason?: string;
 }
 

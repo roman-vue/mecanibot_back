@@ -23,4 +23,25 @@ export const planRateLimit: RequestHandler = (req, _res, next) => {
   next();
 };
 
-export const resetRateLimits = () => windows.clear();
+const MAX_RECOVER_ATTEMPTS = 5;
+const RECOVER_WINDOW_MS = 15 * 60 * 1000;
+const recoverWindows = new Map<string, { count: number; start: number }>();
+
+// Login attempts per IP, so passwords cannot be brute-forced.
+export const recoverRateLimit: RequestHandler = (req, _res, next) => {
+  const now = Date.now();
+  const ip = req.ip ?? 'unknown';
+  const entry = recoverWindows.get(ip);
+  if (!entry || now - entry.start > RECOVER_WINDOW_MS) {
+    recoverWindows.set(ip, { count: 1, start: now });
+    return next();
+  }
+  if (entry.count >= MAX_RECOVER_ATTEMPTS) return next(new AppError(429, 'Too many attempts, try again later', 'RATE_LIMITED'));
+  entry.count += 1;
+  next();
+};
+
+export const resetRateLimits = () => {
+  windows.clear();
+  recoverWindows.clear();
+};

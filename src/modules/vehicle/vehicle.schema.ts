@@ -13,7 +13,11 @@ export const createVehicleSchema = z.object({
   km,
   last_maintenance: ymd,
   last_task: z.string().trim().max(120).optional().default('ninguno'),
+  last_tasks: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
+  last_km: km.optional(),
 });
+
+export const taskCatalogQuerySchema = z.object({ type: z.coerce.number().int().min(0).max(2) });
 
 export const renameVehicleSchema = z.object({ car_plate: plate });
 

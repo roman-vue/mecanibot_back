@@ -54,6 +54,38 @@ export const CATALOG: Record<number, CatalogTask[]> = { 0: EBIKE, 1: MOTO, 2: CA
 // Used to turn km intervals into dates until the vehicle's real usage is learned.
 export const DEFAULT_KM_PER_MONTH: Record<number, number> = { 0: 300, 1: 1000, 2: 1000 };
 
+// Free-text last_task (older app versions) is matched to catalog ids by keyword.
+const TASK_KEYWORDS: Record<string, RegExp> = {
+  oil_change: /aceite(?! de caja)|oil/,
+  oil_filter: /filtro de aceite|aceite y filtro/,
+  air_filter: /filtro de aire/,
+  cabin_filter: /cabina/,
+  spark_plug: /buj/,
+  chain_kit: /cadena|chain/,
+  brakes: /fren|pastilla|brake/,
+  tires: /llanta|neum|presi[oó]n|rotaci/,
+  battery: /bater/,
+  ebike_battery: /bater/,
+  valve_clearance: /v[aá]lvula/,
+  coolant: /refrigerante|coolant/,
+  alignment: /alineaci|balanceo/,
+  timing_belt: /correa|distribuci/,
+  suspension: /suspensi|amortigua/,
+  transmission_fluid: /aceite de caja|transmisi/,
+  electrical: /el[eé]ctric/,
+  general_service: /general|sincroniz|servicio completo/,
+};
+
+export function matchTasks(type: number, text: string | null | undefined): string[] {
+  const t = (text ?? '').toLowerCase();
+  if (!t.trim() || t.trim() === 'ninguno') return [];
+  const catalog = catalogFor(type);
+  const parts = t.split(',').map((p) => p.trim());
+  const exact = catalog.filter((task) => parts.includes(task.name.toLowerCase())).map((task) => task.id);
+  if (exact.length === parts.length) return exact;
+  return catalog.filter((task) => TASK_KEYWORDS[task.id]?.test(t)).map((task) => task.id);
+}
+
 export function catalogFor(type: number): CatalogTask[] {
   return CATALOG[type] ?? CARRO;
 }

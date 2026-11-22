@@ -1,10 +1,16 @@
 import type { Request, Response } from 'express';
 import { created, ok } from '../../shared/http';
-import { createVehicleSchema, plateParamsSchema, renameVehicleSchema, updateKmSchema } from './vehicle.schema';
+import { catalogFor } from '../plan/plan.catalog';
+import { createVehicleSchema, plateParamsSchema, renameVehicleSchema, taskCatalogQuerySchema, updateKmSchema } from './vehicle.schema';
 import * as vehicleService from './vehicle.service';
 
 export function list(req: Request, res: Response) {
   return ok(res, vehicleService.list(req.deviceId));
+}
+
+export function taskCatalog(req: Request, res: Response) {
+  const { type } = taskCatalogQuerySchema.parse(req.query);
+  return ok(res, catalogFor(type).map(({ id, name }) => ({ id, name })));
 }
 
 export function get(req: Request, res: Response) {
@@ -27,6 +33,11 @@ export function remove(req: Request, res: Response) {
   const { plate } = plateParamsSchema.parse(req.params);
   vehicleService.remove(req.deviceId, plate);
   return res.status(204).end();
+}
+
+export async function recalculatePlan(req: Request, res: Response) {
+  const { plate } = plateParamsSchema.parse(req.params);
+  return ok(res, await vehicleService.recalculatePlan(req.deviceId, plate));
 }
 
 export function updateKm(req: Request, res: Response) {

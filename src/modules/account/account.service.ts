@@ -1,7 +1,8 @@
-import { proRequired } from '../../shared/errors';
+import { conflict, invalidCredentials, proRequired } from '../../shared/errors';
+import { hashPassword, verifyPassword } from '../../shared/password';
 import { countVehicles } from '../vehicle/vehicle.model';
 import { toYmd, today } from '../plan/plan.schedule';
-import { findAccount, upsertAccount } from './account.model';
+import { findAccount, findAccountByEmail, saveCredentials, upsertAccount } from './account.model';
 
 export const PLAN_LIMITS = {
   free: { vehicles: 1, historyMonths: 6 as number | null, customReminders: 3 as number | null },
@@ -23,6 +24,7 @@ export function getAccount(deviceId: string) {
   return {
     is_pro: pro,
     pro_since: account?.pro_since ?? null,
+    email: account?.email ?? null,
     limits: { vehicles, historyMonths },
     usage: { vehicles: countVehicles(deviceId) },
   };
@@ -36,4 +38,19 @@ export function setPlan(deviceId: string, pro: boolean) {
 
 export function assertPro(deviceId: string, feature: string): void {
   if (!isPro(deviceId)) throw proRequired(`${feature} is a Pro feature`);
+}
+
+export async function setCredentials(deviceId: string, email: string, password: string, currentPassword?: string) {
+  const account = findAccount(deviceId);
+  if (account?.password_hash && !(await verifyPassword(currentPassword ?? '', account.password_hash))) throw invalidCredentials();
+  const owner = findAccountByEmail(email);
+  if (owner && owner.deviceId !== deviceId) throw conflict('Email already linked to another account', 'EMAIL_TAKEN');
+  saveCredentials(deviceId, email, await hashPassword(password));
+  return getAccount(deviceId);
+}
+
+export async function recover(email: string, password: string) {
+  const account = findAccountByEmail(email);
+  if (!(await verifyPassword(password, account?.password_hash)) || !account) throw invalidCredentials();
+  return { device_id: account.deviceId };
 }

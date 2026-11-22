@@ -63,6 +63,17 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
+  CREATE TABLE IF NOT EXISTS ai_usage (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    cache_key     TEXT,
+    model         TEXT NOT NULL,
+    input_tokens  INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    web_searches  INTEGER NOT NULL,
+    cost_usd      REAL NOT NULL,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
   CREATE TABLE IF NOT EXISTS accounts (
     deviceId  TEXT PRIMARY KEY,
     is_pro    INTEGER NOT NULL DEFAULT 0,
@@ -94,6 +105,9 @@ addColumn('users', 'km_per_month', 'REAL');
 addColumn('users', 'km_updated_at', 'TEXT');
 addColumn('maintenance_history', 'cost', 'INTEGER');
 addColumn('idempotency_keys', 'status_code', 'INTEGER');
+addColumn('accounts', 'email', 'TEXT');
+addColumn('accounts', 'password_hash', 'TEXT');
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS accounts_email ON accounts(email) WHERE email IS NOT NULL');
 
 // Reminders used to be keyed by plate only; attach them to the device that owns the plate.
 db.exec(`

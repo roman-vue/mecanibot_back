@@ -11,4 +11,6 @@ export class AppError extends Error {
 
 export const notFound = (what: string) => new AppError(404, `${what} not found`, 'NOT_FOUND');
 
+export const conflict = (message: string, code: string) => new AppError(409, message, code);
+export const invalidCredentials = () => new AppError(401, 'Invalid email or password', 'INVALID_CREDENTIALS');
 export const proRequired = (message: string) => new AppError(403, message, 'PRO_REQUIRED');

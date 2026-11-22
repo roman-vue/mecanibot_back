@@ -42,9 +42,11 @@ export interface DueInput {
   intervalMonths: number;
   currentKm: number | null;
   kmPerMonth: number;
+  // A new plan may show a task as overdue; recalculations keep it from tomorrow on.
+  allowPast?: boolean;
 }
 
-// A task is due by time or by km, whichever comes first, and never before tomorrow.
+// A task is due by time or by km, whichever comes first, and never before tomorrow unless allowPast.
 export function computeDueDate(input: DueInput): Date {
   let due = addMonths(input.baseDate, input.intervalMonths);
 
@@ -57,17 +59,11 @@ export function computeDueDate(input: DueInput): Date {
   }
 
   const t = today();
-  if (due <= t) {
+  if (!input.allowPast && due <= t) {
     due = new Date(t);
     due.setDate(due.getDate() + 1);
   }
   return due;
-}
-
-// Odometer at a past date, estimated from current km and usage (the last maintenance km is unknown).
-export function estimateKmAt(date: Date, currentKm: number, kmPerMonth: number): number {
-  const months = Math.max(0, monthsBetween(date, today()));
-  return Math.max(0, Math.round(currentKm - months * kmPerMonth));
 }
 
 export function parseKm(km: string | number | null | undefined): number | null {

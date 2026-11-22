@@ -51,7 +51,7 @@ describe('vehicles', () => {
     await createVehicle();
     await api('other-device-2').post('/api/account/plan').send({ pro: true });
     await createVehicle(newVehicle({ car_plate: 'XYZ999', model: 'tvs  raider-125' }), 'other-device-2');
-    expect(askJson).toHaveBeenCalledTimes(1);
+    expect(askJson).toHaveBeenCalledTimes(2);
   });
 
   it('replays the same response for a repeated Idempotency-Key', async () => {
@@ -107,6 +107,35 @@ describe('vehicles', () => {
   });
 });
 
+describe('plan recalculation', () => {
+  it('rebuilds pending plan reminders from history and keeps custom and done ones', async () => {
+    const created = await createVehicle(newVehicle({ last_tasks: ['chain_kit'], last_maintenance: '2026-11-01' }));
+    const oil = created.body.data.reminders.find((r: { task_id: string }) => r.task_id === 'oil_change');
+    await api().post(`/api/reminders/${oil.id}/complete`).send({ km: '10000' });
+    await api().post('/api/vehicles/ABC123/reminders').send({ task: 'Lavar la moto', date: '2030-01-01' });
+
+    const res = await api().post('/api/vehicles/ABC123/plan/recalculate');
+    expect(res.status).toBe(200);
+    const list = res.body.data.reminders as { task_id: string; status: number; base_date: string; base_km: number }[];
+
+    const pendingOil = list.filter((r) => r.task_id === 'oil_change' && r.status === 0);
+    expect(pendingOil).toHaveLength(1);
+    expect(pendingOil[0].base_km).toBe(10000);
+    expect(list.some((r) => r.task_id === 'oil_change' && r.status === 1)).toBe(true);
+    expect(list.filter((r) => r.task_id === 'custom')).toHaveLength(1);
+    expect(list.find((r) => r.task_id === 'chain_kit' && r.status === 0)?.base_date).toBe('2026-11-01');
+    expect(history_untouched(await api().get('/api/vehicles/ABC123/history'))).toBe(true);
+  });
+
+  it('returns 404 for a vehicle of another device', async () => {
+    await createVehicle();
+    const res = await api('other-device-xyz').post('/api/vehicles/ABC123/plan/recalculate');
+    expect(res.status).toBe(404);
+  });
+});
+
+const history_untouched = (res: { body: { data: { history: unknown[] } } }) => res.body.data.history.length === 2;
+
 describe('reminders and maintenance', () => {
   it('completes a reminder, logs history and schedules the next one', async () => {
     const created = await createVehicle();
@@ -153,5 +182,47 @@ describe('reminders and maintenance', () => {
     await createVehicle();
     const res = await api().patch('/api/vehicles/ABC123/km').send({ km: '12000' });
     expect(res.body.data).toMatchObject({ km: 12000, km_per_month: null });
+  });
+});
+
+describe('account credentials', () => {
+  const creds = { email: 'Roman@Example.com', password: 'secret-123' };
+
+  it('links an email and recovers the same account on another device', async () => {
+    const linked = await api().put('/api/account/credentials').send(creds);
+    expect(linked.status).toBe(200);
+    expect(linked.body.data.email).toBe('roman@example.com');
+    expect(JSON.stringify(linked.body)).not.toMatch(/password|hash/);
+    const res = await api('new-phone-0001').post('/api/account/recover').send({ email: 'roman@example.com', password: creds.password });
+    expect(res.body.data).toEqual({ device_id: DEVICE });
+  });
+
+  it('rejects a wrong password and an unknown email the same way', async () => {
+    await api().put('/api/account/credentials').send(creds);
+    const wrong = await api('new-phone-0001').post('/api/account/recover').send({ ...creds, password: 'nope-nope' });
+    const unknown = await api('new-phone-0001').post('/api/account/recover').send({ ...creds, email: 'x@y.com' });
+    expect(wrong.status).toBe(401);
+    expect(unknown.body).toEqual(wrong.body);
+  });
+
+  it('rejects an email linked to another account', async () => {
+    await api().put('/api/account/credentials').send(creds);
+    const res = await api('other-device-3').put('/api/account/credentials').send(creds);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('EMAIL_TAKEN');
+  });
+
+  it('asks for the current password before changing credentials', async () => {
+    await api().put('/api/account/credentials').send(creds);
+    const res = await api().put('/api/account/credentials').send({ email: 'new@example.com', password: 'another-123' });
+    expect(res.status).toBe(401);
+    const okRes = await api().put('/api/account/credentials').send({ email: 'new@example.com', password: 'another-123', current_password: creds.password });
+    expect(okRes.body.data.email).toBe('new@example.com');
+  });
+
+  it('limits recovery attempts', async () => {
+    for (let i = 0; i < 5; i++) await api('new-phone-0001').post('/api/account/recover').send(creds);
+    const res = await api('new-phone-0001').post('/api/account/recover').send(creds);
+    expect(res.status).toBe(429);
   });
 });

@@ -1,8 +1,8 @@
 import { askJson } from '../../integrations/openai';
 import { logger } from '../../middlewares/logger.middleware';
-import { CatalogTask, catalogFor, clamp } from './plan.catalog';
+import { CatalogTask, catalogFor, clamp, matchTasks } from './plan.catalog';
 import { AiPlan, AiTask, readCachedPlan, saveCachedPlan } from './plan.model';
-import { computeDueDate, estimateKmAt, parseKm, parseYmd, toYmd, today, usageFor } from './plan.schedule';
+import { computeDueDate, parseKm, parseYmd, toYmd, today, usageFor } from './plan.schedule';
 
 export interface PlannedTask {
   task_id: string;
@@ -21,11 +21,19 @@ export interface VehicleForPlan {
   km: string;
   lastMaintenance: string;
   lastTask: string;
+  // Catalog ids done at lastMaintenance; when absent they are inferred from lastTask.
+  lastTasks?: string[];
+  // Odometer at lastMaintenance; when absent the current km is used (never guessed from usage).
+  lastKm?: string;
+  // Per-task last known service (from history); wins over lastTasks.
+  taskBases?: Record<string, { date: string; km: number | null }>;
 }
 
 const TYPE_NAMES: Record<number, string> = { 0: 'electrobici (bicicleta eléctrica)', 1: 'moto', 2: 'carro' };
 const TYPICAL_SOURCE = 'intervalo típico para este tipo de vehículo';
 const INSTRUCTIONS = 'Eres un experto en mantenimiento de vehículos. Respondes únicamente con JSON válido.';
+
+const MAX_DISAGREEMENT = 0.25;
 
 const formatKm = (n: number) => n.toLocaleString('es-CO');
 
@@ -38,23 +46,16 @@ export function normalizeModel(model: string): string {
     .trim();
 }
 
-function buildPrompt(v: VehicleForPlan, catalog: CatalogTask[]): string {
+export function buildPrompt(type: number, model: string, catalog: CatalogTask[]): string {
   const list = catalog
     .map((t) => `- ${t.id}: ${t.name}${t.km ? ` (rango km ${t.km.min}-${t.km.max})` : ' (solo por tiempo)'} (rango meses ${t.months.min}-${t.months.max})`)
     .join('\n');
-  const typeName = TYPE_NAMES[v.type] ?? 'carro';
+  const typeName = TYPE_NAMES[type] ?? 'carro';
 
   return `
-Fecha de hoy: ${toYmd(today())}
+Vehículo: ${typeName}, marca y modelo "${model}".
 
-Vehículo:
-- Tipo: ${typeName}
-- Marca y modelo: ${v.model}
-- Kilometraje actual: ${v.km} km
-- Último mantenimiento: ${v.lastMaintenance}
-- Trabajo realizado en ese mantenimiento: ${v.lastTask || 'ninguno'}
-
-Busca en internet el plan de mantenimiento del fabricante (manual de usuario o de servicio) para "${v.model}" (${typeName}).
+Busca en internet el plan de mantenimiento del fabricante (manual de usuario o de servicio) para "${model}" (${typeName}).
 
 Elige SOLO tareas de esta lista cerrada (usa exactamente el id). No inventes tareas ni ids:
 ${list}
@@ -62,11 +63,11 @@ ${list}
 Evalúa TODAS las tareas de la lista. Para cada una indica el intervalo PERIÓDICO recomendado por el fabricante
 (interval_km y interval_months; si la tarea es solo por tiempo usa interval_km: null).
 Usa el intervalo regular de servicio, NO el del primer servicio de rodaje/asentamiento.
-Si no encuentras el dato del fabricante, usa un valor típico para ese tipo de vehículo.
-Incluye también la tarea ya realizada (su próxima repetición).
+Si el nombre de la tarea empieza por "Revisión", da el intervalo de INSPECCIÓN, no el de reemplazo de la pieza.
+Indica en "basis" si el dato viene del fabricante ("manual") o es un valor típico para ese tipo de vehículo ("typical").
 
 Responde SOLO con JSON válido, sin texto adicional ni bloques de código:
-{"source": "fuente principal (ej. Manual de servicio TVS Raider 125)", "tasks": [{"id": "oil_change", "interval_km": 5000, "interval_months": 6, "reason": "por qué es importante, en una frase, SIN mencionar intervalos ni km"}]}
+{"source": "fuente principal (ej. Manual de servicio TVS Raider 125)", "tasks": [{"id": "oil_change", "interval_km": 5000, "interval_months": 6, "basis": "manual", "reason": "por qué es importante, en una frase, SIN mencionar intervalos ni km"}]}
 `.trim();
 }
 
@@ -83,25 +84,54 @@ export function parsePlan(text: string): AiPlan | null {
   }
 }
 
-async function askAiPlan(v: VehicleForPlan, catalog: CatalogTask[]): Promise<AiPlan | null> {
-  const prompt = buildPrompt(v, catalog);
+async function askAiPlan(prompt: string, cacheKey: string): Promise<AiPlan | null> {
   try {
-    return parsePlan(await askJson(INSTRUCTIONS, prompt, { webSearch: true }));
+    return parsePlan(await askJson(INSTRUCTIONS, prompt, { webSearch: true, cacheKey }));
   } catch (err) {
     logger.warn('OpenAI with web search failed, retrying without it', { err: String(err) });
   }
   try {
-    return parsePlan(await askJson(INSTRUCTIONS, prompt));
+    return parsePlan(await askJson(INSTRUCTIONS, prompt, { cacheKey }));
   } catch (err) {
     logger.error('OpenAI failed, using catalog defaults', { err: String(err) });
     return null;
   }
 }
 
+type ValidTask = AiTask & { task: CatalogTask };
+
+const agree = (a: number | null | undefined, b: number | null | undefined) =>
+  a == null || b == null ? a == b : Math.abs(a - b) <= MAX_DISAGREEMENT * Math.max(a, b);
+const shorter = (a: number | null | undefined, b: number | null | undefined) => (a == null || b == null ? a ?? b ?? null : Math.min(a, b));
+
+// Two independent answers per model: a task is trusted only when both agree, then the shorter interval wins.
+export function mergePlans(a: Map<string, ValidTask>, b: Map<string, ValidTask>): Map<string, ValidTask> {
+  if (!a.size) return b;
+  if (!b.size) return a;
+  const merged = new Map<string, ValidTask>();
+  const inconsistent: string[] = [];
+  for (const [id, x] of a) {
+    const y = b.get(id);
+    if (!y) continue;
+    if (!agree(x.interval_km, y.interval_km) || !agree(x.interval_months, y.interval_months)) {
+      inconsistent.push(id);
+      continue;
+    }
+    merged.set(id, {
+      ...x,
+      interval_km: shorter(x.interval_km, y.interval_km),
+      interval_months: shorter(x.interval_months, y.interval_months) ?? x.interval_months,
+      basis: x.basis === 'manual' && y.basis === 'manual' ? 'manual' : 'typical',
+    });
+  }
+  if (inconsistent.length) logger.warn('AI answers disagree, using catalog defaults', { inconsistent });
+  return merged;
+}
+
 // Keeps only catalog tasks and clamps their intervals to the catalog ranges.
-export function validatePlan(plan: AiPlan | null, catalog: CatalogTask[]): Map<string, AiTask & { task: CatalogTask }> {
+export function validatePlan(plan: AiPlan | null, catalog: CatalogTask[]): Map<string, ValidTask> {
   const byId = new Map(catalog.map((t) => [t.id, t]));
-  const chosen = new Map<string, AiTask & { task: CatalogTask }>();
+  const chosen = new Map<string, ValidTask>();
   const discarded: string[] = [];
 
   for (const t of plan?.tasks ?? []) {
@@ -116,6 +146,7 @@ export function validatePlan(plan: AiPlan | null, catalog: CatalogTask[]): Map<s
       id: task.id,
       interval_km: task.km ? clamp(t.interval_km, task.km) : null,
       interval_months: clamp(t.interval_months, task.months),
+      basis: t.basis === 'manual' ? 'manual' : 'typical',
       reason: typeof t.reason === 'string' ? t.reason.slice(0, 300) : undefined,
     });
   }
@@ -129,9 +160,18 @@ export async function buildMaintenancePlan(v: VehicleForPlan): Promise<PlannedTa
   const cacheKey = `${v.type}|${normalizeModel(v.model)}`;
 
   const cached = readCachedPlan(cacheKey);
-  const plan = cached ?? (await askAiPlan(v, catalog));
-  const chosen = validatePlan(plan, catalog);
-  const aiSource = chosen.size > 0 && plan?.source ? String(plan.source).slice(0, 120) : null;
+  let chosen: Map<string, ValidTask>;
+  let rawSource: string | undefined;
+  if (cached) {
+    chosen = validatePlan(cached, catalog);
+    rawSource = cached.source;
+  } else {
+    const prompt = buildPrompt(v.type, v.model, catalog);
+    const [a, b] = await Promise.all([askAiPlan(prompt, cacheKey), askAiPlan(prompt, cacheKey)]);
+    chosen = mergePlans(validatePlan(a, catalog), validatePlan(b, catalog));
+    rawSource = a?.source ?? b?.source;
+  }
+  const aiSource = chosen.size > 0 && rawSource ? String(rawSource).slice(0, 120) : null;
 
   // Only validated AI results are cached, so a failed call is never reused.
   if (!cached && chosen.size > 0) {
@@ -143,10 +183,11 @@ export async function buildMaintenancePlan(v: VehicleForPlan): Promise<PlannedTa
     }
   }
 
-  const baseDate = parseYmd(v.lastMaintenance) ?? today();
+  const lastDate = parseYmd(v.lastMaintenance) ?? today();
   const usage = usageFor(v.type);
   const currentKm = parseKm(v.km);
-  const baseKm = currentKm !== null ? estimateKmAt(baseDate, currentKm, usage) : null;
+  const lastKm = parseKm(v.lastKm) ?? currentKm;
+  const done = new Set(v.lastTasks?.length ? v.lastTasks : matchTasks(v.type, v.lastTask));
 
   const planned = catalog.map((task): PlannedTask => {
     const ai = chosen.get(task.id);
@@ -157,7 +198,12 @@ export async function buildMaintenancePlan(v: VehicleForPlan): Promise<PlannedTa
     const monthsText = months === 1 ? '1 mes' : `${months} meses`;
     const every = intervalKm ? `Cada ${formatKm(intervalKm)} km o ${monthsText}, lo que ocurra primero` : `Cada ${monthsText}`;
     const why = ai?.reason ? ai.reason.replace(/[.\s]+$/, '') + '. ' : '';
-    const due = computeDueDate({ baseDate, baseKm, intervalKm, intervalMonths: months, currentKm, kmPerMonth: usage });
+    // Tasks done at the last maintenance count from that day; the rest from today (history unknown).
+    const known = v.taskBases?.[task.id];
+    const wasDone = done.has(task.id);
+    const baseDate = known ? parseYmd(known.date) ?? today() : wasDone ? lastDate : today();
+    const baseKm = known ? known.km ?? currentKm : wasDone ? lastKm : currentKm;
+    const due = computeDueDate({ baseDate, baseKm, intervalKm, intervalMonths: months, currentKm, kmPerMonth: usage, allowPast: true });
 
     return {
       task_id: task.id,

@@ -60,6 +60,32 @@ export const insertReminders = db.transaction((rows: NewReminderRow[]) => {
   for (const r of rows) insertReminder(r);
 });
 
+export interface TaskServiceRow {
+  task_id: string | null;
+  task: string;
+  date: string;
+  km: string | null;
+}
+
+// Every logged service of a vehicle, with the plan task it completed when known.
+export function listTaskServices(deviceId: string, plate: string): TaskServiceRow[] {
+  return db
+    .prepare(
+      `SELECT r.task_id, h.task, h.date, h.km FROM maintenance_history h
+       LEFT JOIN reminders r ON r.id = h.reminder_id
+       WHERE h.deviceId = ? AND h.car_plate = ?`,
+    )
+    .all(deviceId, plate) as TaskServiceRow[];
+}
+
+export function deletePendingPlan(deviceId: string, plate: string, taskIds: string[]): number {
+  if (!taskIds.length) return 0;
+  const marks = taskIds.map(() => '?').join(', ');
+  return db
+    .prepare(`DELETE FROM reminders WHERE deviceId = ? AND car_plate = ? AND status = 0 AND task_id IN (${marks})`)
+    .run(deviceId, plate, ...taskIds).changes;
+}
+
 export function markDone(id: number): void {
   db.prepare('UPDATE reminders SET status = 1 WHERE id = ?').run(id);
 }

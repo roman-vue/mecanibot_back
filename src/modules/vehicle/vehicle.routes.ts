@@ -9,11 +9,13 @@ import * as vehicles from './vehicle.controller';
 export const vehicleRoutes = Router();
 
 vehicleRoutes.get('/', vehicles.list);
+vehicleRoutes.get('/task-catalog', vehicles.taskCatalog);
 vehicleRoutes.post('/', idempotency, planRateLimit, vehicles.create);
 vehicleRoutes.get('/:plate', vehicles.get);
 vehicleRoutes.patch('/:plate', vehicles.rename);
 vehicleRoutes.delete('/:plate', vehicles.remove);
 vehicleRoutes.patch('/:plate/km', vehicles.updateKm);
+vehicleRoutes.post('/:plate/plan/recalculate', planRateLimit, vehicles.recalculatePlan);
 
 vehicleRoutes.get('/:plate/reminders', reminders.list);
 vehicleRoutes.post('/:plate/reminders', reminders.addCustom);
